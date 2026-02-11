@@ -1,59 +1,92 @@
+use std::sync::Arc;
+
 use crossbeam_channel::bounded;
-use RustBFT::consensus::{ConsensusConfig, ConsensusCore, ConsensusDeps, ConsensusEvent};
-use RustBFT::types::{Hash, Validator, ValidatorId, ValidatorSet};
 
-fn main() {
-    let (tx_ev, rx_ev) = bounded::<ConsensusEvent>(1024);
-    let (tx_cmd, rx_cmd) = bounded(1024);
+use RustBFT::p2p::{P2pConfig, P2pManager};
+use RustBFT::p2p::peer::HandshakeDeps;
 
-    // dummy validator set (4 validators)
-    let v1 = ValidatorId([1u8; 32]);
-    let v2 = ValidatorId([2u8; 32]);
-    let v3 = ValidatorId([3u8; 32]);
-    let v4 = ValidatorId([4u8; 32]);
+// ===== Bạn map theo code consensus của bạn =====
+use RustBFT::consensus::{ConsensusCore, ConsensusConfig, ConsensusEvent, ConsensusCommand};
+// ==============================================
 
-    let vset = ValidatorSet::new(
-        vec![
-            Validator { id: v1, voting_power: 1 },
-            Validator { id: v2, voting_power: 1 },
-            Validator { id: v3, voting_power: 1 },
-            Validator { id: v4, voting_power: 1 },
-        ],
-        Hash([9u8; 32]),
-    );
+use RustBFT::crypto::ed25519::load_or_generate_keypair; // hoặc generate_keypair
+use RustBFT::types::{ValidatorId, SignedProposal, SignedVote};
 
-    let deps = ConsensusDeps {
-        verify_proposal_sig: Box::new(|_p| true),
-        verify_vote_sig: Box::new(|_v| true),
-        validate_block: Box::new(|_b| true),
-        have_full_block: Box::new(|_h| true),
-        block_hash: Box::new(|b| {
-            // placeholder deterministic hash: hash(height)
-            let mut out = [0u8; 32];
-            out[0..8].copy_from_slice(&b.header.height.to_le_bytes());
-            Hash(out)
-        }),
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 1) net -> consensus bounded channel (docs: capacity 256)
+    let (tx_consensus_ev, rx_consensus_ev) = bounded::<ConsensusEvent>(256);
+
+    // 2) consensus -> router commands (capacity tuỳ, 1024 ok)
+    let (tx_consensus_cmd, rx_consensus_cmd) = bounded::<ConsensusCommand>(1024);
+
+    // 3) Load config (tạm hardcode để chạy)
+    let p2p_cfg = P2pConfig {
+        listen_addr: "0.0.0.0:26656".to_string(),
+        seeds: vec![], // add "node2@127.0.0.1:26657" etc
+        ..Default::default()
     };
 
-    let core = ConsensusCore::new(
-        ConsensusConfig::default(),
-        deps,
-        v1,      // pretend we're validator 1
-        1,       // start height=1
-        vset,
-        rx_ev,
-        tx_cmd,
-    );
+    // 4) Keys + identity (ValidatorId)
+    // Bạn có thể derive ValidatorId = sha256(pubkey) hoặc config sẵn.
+    let (signing_key, verify_key) = load_or_generate_keypair("node_key.json")?;
+    let my_id = ValidatorId(verify_key.to_bytes()); // MVP: dùng pubkey bytes làm id luôn
 
-    std::thread::spawn(move || core.run());
+    let hs = HandshakeDeps {
+        my_id,
+        my_signing: signing_key,
+        my_verify: verify_key,
+        chain_id: "localnet".to_string(),
+        protocol_version: 1,
+    };
 
-    // Print commands emitted by consensus (demo)
-    loop {
-        match rx_cmd.recv() {
-            Ok(cmd) => println!("CMD: {:?}", cmd),
-            Err(_) => break,
-        }
+    // 5) Verify hooks cho networking (P2P phải verify trước khi forward)
+    // Ở MVP bạn có thể gọi thẳng crypto verify trong consensus/types.
+    // Ở đây để “pass-through” (bạn thay bằng verify thật).
+    let verify_proposal: Arc<dyn Fn(&SignedProposal) -> bool + Send + Sync> =
+        Arc::new(|_p| true);
+    let verify_vote: Arc<dyn Fn(&SignedVote) -> bool + Send + Sync> =
+        Arc::new(|_v| true);
+
+    // 6) Start consensus thread (sync/blocking)
+    {
+        let my_id_for_consensus = my_id;
+        std::thread::spawn(move || {
+            let cfg = ConsensusConfig::default();
+
+            // Bạn khởi tạo consensus core theo constructor của bạn:
+            let mut core = ConsensusCore::new(
+                cfg,
+                my_id_for_consensus,
+                rx_consensus_ev,
+                tx_consensus_cmd,
+                // + validator_set / deps / etc theo code của bạn
+            );
+
+            core.run(); // blocking loop
+        });
     }
 
-    drop(tx_ev);
+    // 7) Start P2P manager (Tokio)
+    let (p2p, p2p_handle) = P2pManager::new(
+        p2p_cfg,
+        hs,
+        verify_proposal,
+        verify_vote,
+        tx_consensus_ev, // important
+    );
+
+    // 8) Router: consensus commands -> p2p dispatcher
+    // Consensus emits BroadcastProposal/BroadcastVote, p2p fanout to peers.
+    let tx_p2p_cmd = p2p_handle.tx_cmd.clone();
+    tokio::spawn(async move {
+        while let Ok(cmd) = rx_consensus_cmd.recv() {
+            // If p2p queue full: await sẽ backpressure (ok)
+            let _ = tx_p2p_cmd.send(cmd).await;
+        }
+    });
+
+    // 9) Run p2p forever
+    p2p.run().await?;
+    Ok(())
 }
