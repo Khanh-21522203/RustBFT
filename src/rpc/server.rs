@@ -3,9 +3,12 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::State,
-    routing::post,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
     Json, Router,
 };
+use serde_json::json;
 
 use crate::rpc::handlers::{dispatch, RpcState};
 use crate::rpc::types::{JsonRpcRequest, JsonRpcResponse, ERR_INVALID_REQUEST};
@@ -41,6 +44,8 @@ impl RpcServer {
     pub async fn run(self) -> Result<(), anyhow::Error> {
         let app = Router::new()
             .route("/", post(handle_jsonrpc))
+            .route("/health", get(handle_health))
+            .route("/ready", get(handle_ready))
             .with_state(self.state);
 
         let addr: SocketAddr = self.config.listen_addr.parse()?;
@@ -63,4 +68,34 @@ async fn handle_jsonrpc(
     }
     let resp = dispatch(&state, req).await;
     Json(resp)
+}
+
+/// GET /health — liveness probe (doc 14 section 4.1).
+async fn handle_health(
+    State(state): State<Arc<RpcState>>,
+) -> impl IntoResponse {
+    let storage_height = state.block_store.last_height().unwrap_or(0);
+
+    let body = json!({
+        "healthy": true,
+        "checks": {
+            "storage": { "status": "ok", "latest_height": storage_height },
+        }
+    });
+    (StatusCode::OK, Json(body))
+}
+
+/// GET /ready — readiness probe (doc 14 section 4.3).
+async fn handle_ready(
+    State(state): State<Arc<RpcState>>,
+) -> impl IntoResponse {
+    let storage_height = state.block_store.last_height().unwrap_or(0);
+    let ready = storage_height > 0;
+
+    let status = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let body = json!({
+        "ready": ready,
+        "latest_height": storage_height,
+    });
+    (status, Json(body))
 }

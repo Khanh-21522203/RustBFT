@@ -1,0 +1,16 @@
+# devops/prometheus.yml (doc 15 section 4)
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "rustbft"
+    static_configs:
+      - targets:
+          - "172.28.1.1:26660"
+          - "172.28.1.2:26660"
+          - "172.28.1.3:26660"
+          - "172.28.1.4:26660"
+        labels:
+          cluster: "local-testnet"

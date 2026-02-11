@@ -12,7 +12,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 thiserror = "1"
 serde_bytes = "0.11"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 bytes = "1"
 lru = "0.12"
 
@@ -31,3 +31,11 @@ axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 hyper = "1"
+
+# Observability (doc 14)
+prometheus-client = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Config (doc 16)
+toml = "0.8"

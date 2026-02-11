@@ -1,0 +1,130 @@
+# devops/docker-compose.yml (doc 15 section 3)
+
+version: "3.8"
+
+networks:
+  rustbft-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+  node0:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile
+    container_name: rustbft-node0
+    hostname: node0
+    networks:
+      rustbft-net:
+        ipv4_address: 172.28.1.1
+    ports:
+      - "26656:26656"   # P2P
+      - "26657:26657"   # RPC
+      - "26660:26660"   # Metrics
+    volumes:
+      - ./config/node0:/config
+      - node0-data:/data
+    environment:
+      - RUSTBFT_NODE_ID=node0
+      - RUST_LOG=rustbft_consensus=debug,rustbft_p2p=info
+    restart: unless-stopped
+
+  node1:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile
+    container_name: rustbft-node1
+    hostname: node1
+    networks:
+      rustbft-net:
+        ipv4_address: 172.28.1.2
+    ports:
+      - "26756:26657"
+      - "26760:26660"
+    volumes:
+      - ./config/node1:/config
+      - node1-data:/data
+    environment:
+      - RUSTBFT_NODE_ID=node1
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  node2:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile
+    container_name: rustbft-node2
+    hostname: node2
+    networks:
+      rustbft-net:
+        ipv4_address: 172.28.1.3
+    ports:
+      - "26856:26657"
+      - "26860:26660"
+    volumes:
+      - ./config/node2:/config
+      - node2-data:/data
+    environment:
+      - RUSTBFT_NODE_ID=node2
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  node3:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile
+    container_name: rustbft-node3
+    hostname: node3
+    networks:
+      rustbft-net:
+        ipv4_address: 172.28.1.4
+    ports:
+      - "26956:26657"
+      - "26960:26660"
+    volumes:
+      - ./config/node3:/config
+      - node3-data:/data
+    environment:
+      - RUSTBFT_NODE_ID=node3
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: rustbft-prometheus
+    networks:
+      rustbft-net:
+        ipv4_address: 172.28.1.10
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: rustbft-grafana
+    networks:
+      rustbft-net:
+        ipv4_address: 172.28.1.11
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    restart: unless-stopped
+
+volumes:
+  node0-data:
+  node1-data:
+  node2-data:
+  node3-data:
+  prometheus-data:
+  grafana-data:

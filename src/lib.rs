@@ -6,3 +6,5 @@ pub mod state;
 pub mod contracts;
 pub mod storage;
 pub mod rpc;
+pub mod metrics;
+pub mod config;

@@ -1,0 +1,42 @@
+{
+    "chain_id": "rustbft-local-1",
+    "genesis_time": 1700000000,
+    "initial_validators": [
+        {
+            "id": "node0",
+            "public_key": "ed25519:<node0-pubkey-hex>",
+            "voting_power": 100
+        },
+        {
+            "id": "node1",
+            "public_key": "ed25519:<node1-pubkey-hex>",
+            "voting_power": 100
+        },
+        {
+            "id": "node2",
+            "public_key": "ed25519:<node2-pubkey-hex>",
+            "voting_power": 100
+        },
+        {
+            "id": "node3",
+            "public_key": "ed25519:<node3-pubkey-hex>",
+            "voting_power": 100
+        }
+    ],
+    "initial_accounts": [
+        {
+            "address": "0xalice0000000000000000000000000000000000",
+            "balance": 10000000
+        },
+        {
+            "address": "0xbob00000000000000000000000000000000000000",
+            "balance": 10000000
+        }
+    ],
+    "admin_addresses": ["0xalice0000000000000000000000000000000000"],
+    "chain_params": {
+        "max_block_gas": 10000000,
+        "max_block_bytes": 1048576,
+        "max_tx_bytes": 65536
+    }
+}
