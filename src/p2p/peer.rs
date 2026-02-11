@@ -92,11 +92,9 @@ fn rand32() -> [u8;32] {
     r
 }
 
-pub async fn handshake(
-    role: PeerRole,
-    mut f: PlainFramer,
-    deps: HandshakeDeps,
-) -> Result<(ValidatorId, EncryptedFramer), NetCodecError> {
+pub async fn handshake(role: PeerRole, mut f: PlainFramer, deps: HandshakeDeps,)
+    -> Result<(ValidatorId, EncryptedFramer), NetCodecError> {
+
     let (my_xsec, my_xpub) = x25519();
     let my_nonce = rand32();
     let chain_id_bytes = deps.chain_id.as_bytes().to_vec();
