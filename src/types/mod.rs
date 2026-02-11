@@ -9,7 +9,7 @@ pub mod address;
 
 pub use hash::Hash;
 pub use address::Address;
-pub use validator::{ValidatorId, Validator, ValidatorSet};
+pub use validator::{ValidatorId, Validator, ValidatorSet, ValidatorUpdate, ValidatorSetPolicy, ValidatorSetError};
 pub use vote::{VoteType, Vote, SignedVote, Evidence};
 pub use proposal::{Proposal, SignedProposal};
 pub use block::{Block, BlockHeader};

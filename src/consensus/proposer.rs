@@ -2,30 +2,43 @@ use crate::types::{ValidatorId, ValidatorSet};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-/// Deterministic weighted round-robin.
-/// IMPORTANT: priority is recomputed from genesis / last committed validator set by "steps".
-/// For (height, round), we model "steps = height * K + round" with K large enough,
-/// but to stay exact, caller should pass a deterministic `selection_steps` counter.
-pub fn select_proposer(vset: &ValidatorSet, selection_steps: u64) -> ValidatorId {
-    // priority accumulator per validator
-    // recompute from 0 deterministically each call
-    let mut priority: BTreeMap<ValidatorId, i128> = BTreeMap::new();
-    for id in vset.ids_in_order() {
-        priority.insert(*id, 0);
+/// Deterministic weighted round-robin proposer selection.
+///
+/// Uses an incremental priority accumulator that is O(n) per selection step.
+/// The `ProposerState` should be cached across rounds within the same height
+/// and reset when the validator set changes.
+#[derive(Clone, Debug)]
+pub struct ProposerState {
+    priorities: BTreeMap<ValidatorId, i128>,
+    total_power: i128,
+}
+
+impl ProposerState {
+    /// Initialize proposer state from a validator set (all priorities = 0).
+    pub fn new(vset: &ValidatorSet) -> Self {
+        let mut priorities = BTreeMap::new();
+        for v in vset.validators_in_order() {
+            priorities.insert(v.id, 0);
+        }
+        Self {
+            priorities,
+            total_power: vset.total_power() as i128,
+        }
     }
 
-    let total = vset.total_power() as i128;
-
-    for _ in 0..selection_steps {
-        // add voting power
+    /// Perform one selection step: add voting power, pick best, subtract total.
+    /// Returns the selected proposer for this step.
+    pub fn next_proposer(&mut self, vset: &ValidatorSet) -> ValidatorId {
+        // 1. Add voting_power to each validator's priority
         for v in vset.validators_in_order() {
-            let e = priority.get_mut(&v.id).expect("exists");
-            *e += v.voting_power as i128;
+            if let Some(p) = self.priorities.get_mut(&v.id) {
+                *p += v.voting_power as i128;
+            }
         }
 
-        // pick max priority (deterministic tie-break by ValidatorId order)
+        // 2. Pick validator with highest priority (deterministic tie-break by ValidatorId)
         let mut best: Option<(ValidatorId, i128)> = None;
-        for (id, p) in priority.iter() {
+        for (id, p) in self.priorities.iter() {
             match best {
                 None => best = Some((*id, *p)),
                 Some((best_id, best_p)) => {
@@ -37,40 +50,32 @@ pub fn select_proposer(vset: &ValidatorSet, selection_steps: u64) -> ValidatorId
             }
         }
 
-        let (best_id, _) = best.expect("non-empty vset");
-        let e = priority.get_mut(&best_id).expect("exists");
-        *e -= total;
-    }
+        let (best_id, _) = best.expect("non-empty validator set");
 
-    // After `selection_steps` iterations, the last selected proposer is:
-    // To obtain it, do one more selection step and return that best.
-    // This matches “selection step” semantics.
-    // Implement by performing one extra step and returning best.
-
-    // add voting power
-    for v in vset.validators_in_order() {
-        let e = priority.get_mut(&v.id).expect("exists");
-        *e += v.voting_power as i128;
-    }
-    let mut best: Option<(ValidatorId, i128)> = None;
-    for (id, p) in priority.iter() {
-        match best {
-            None => best = Some((*id, *p)),
-            Some((best_id, best_p)) => {
-                let ord = p.cmp(&best_p).then_with(|| id.cmp(&best_id));
-                if ord == Ordering::Greater {
-                    best = Some((*id, *p));
-                }
-            }
+        // 3. Subtract total_power from the selected validator
+        if let Some(p) = self.priorities.get_mut(&best_id) {
+            *p -= self.total_power;
         }
+
+        best_id
     }
-    best.expect("non-empty").0
+}
+
+/// Stateless proposer selection: O(n * (height + round)) per call.
+/// Computes the proposer for a given (height, round) by running the round-robin
+/// from scratch. Each height starts fresh (proposer state reset per doc 8 section 6).
+/// Height is incorporated so different heights pick different proposers at round 0.
+pub fn select_proposer(vset: &ValidatorSet, height: u64, round: u32) -> ValidatorId {
+    let mut state = ProposerState::new(vset);
+    let total_steps = height.saturating_add(round as u64).saturating_add(1);
+    let mut last = vset.ids_in_order().next().copied().expect("non-empty");
+    for _ in 0..total_steps {
+        last = state.next_proposer(vset);
+    }
+    last
 }
 
 /// Deterministic mapping from (height, round) to selection steps.
-/// You can revise once you define genesis height and whether height starts at 1.
 pub fn selection_steps(height: u64, round: u32) -> u64 {
-    // Simple bijection: steps = height * 1_000_000 + round
-    // (assumes round won't exceed 1_000_000 in practice)
-    height.saturating_mul(1_000_000).saturating_add(round as u64)
+    height.saturating_add(round as u64).saturating_add(1)
 }

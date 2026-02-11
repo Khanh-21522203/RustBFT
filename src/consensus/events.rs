@@ -1,4 +1,4 @@
-use crate::types::{Block, Hash, SignedProposal, SignedVote};
+use crate::types::{Block, Hash, SignedProposal, SignedVote, ValidatorUpdate};
 
 #[derive(Clone, Debug)]
 pub enum ConsensusEvent {
@@ -15,7 +15,7 @@ pub enum ConsensusEvent {
     BlockExecuted {
         height: u64,
         state_root: Hash,
-        // validator_updates: Vec<ValidatorUpdate> (để sau)
+        validator_updates: Vec<ValidatorUpdate>,
     },
 
     // From mempool (response to reap)
@@ -37,7 +37,7 @@ pub enum ConsensusCommand {
 
     // To storage
     PersistBlock { block: Block, state_root: Hash },
-    WriteWAL { entry: Vec<u8> }, // placeholder
+    WriteWAL { entry: Vec<u8> },
 
     // To timers
     ScheduleTimeout { timeout: Timeout },

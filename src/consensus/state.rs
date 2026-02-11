@@ -1,13 +1,15 @@
 use crate::consensus::events::{ConsensusCommand, ConsensusEvent, Timeout, TimeoutKind};
-use crate::consensus::proposer::{select_proposer, selection_steps};
+use crate::consensus::proposer::select_proposer;
 use crate::consensus::vote_set::VoteSet;
 use crate::types::{
-    Block, Hash, SignedProposal, SignedVote, ValidatorId, ValidatorSet, Vote, VoteType,
+    Block, Hash, SignedProposal, SignedVote, ValidatorId, ValidatorSet, ValidatorSetPolicy,
+    ValidatorUpdate, Vote, VoteType,
 };
 use crossbeam_channel::{Receiver, Sender};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
+    NewHeight,
     Propose,
     Prevote,
     Precommit,
@@ -79,6 +81,9 @@ pub struct ConsensusCore {
     // fixed validator set for this height
     validator_set: ValidatorSet,
 
+    // policy for validator set updates (doc 8)
+    validator_set_policy: ValidatorSetPolicy,
+
     // node identity
     my_id: ValidatorId,
 
@@ -88,6 +93,10 @@ pub struct ConsensusCore {
 
     // if we are proposer and asked mempool for txs
     awaiting_txs: bool,
+
+    // track whether we already voted this round (invariants I1, I2)
+    prevoted_this_round: bool,
+    precommitted_this_round: bool,
 }
 
 impl ConsensusCore {
@@ -105,7 +114,7 @@ impl ConsensusCore {
             deps,
             height,
             round: 0,
-            step: Step::Propose,
+            step: Step::NewHeight,
             locked_round: None,
             locked_block: None,
             valid_round: None,
@@ -113,42 +122,55 @@ impl ConsensusCore {
             proposal: None,
             votes: VoteSet::new(height),
             validator_set,
+            validator_set_policy: ValidatorSetPolicy::default(),
             my_id,
             rx,
             tx_cmd,
             awaiting_txs: false,
+            prevoted_this_round: false,
+            precommitted_this_round: false,
         }
     }
 
     pub fn run(mut self) {
         // Enter first height/round
-        self.enter_propose();
+        self.enter_new_height();
 
         loop {
+            // 1. Blocking receive
             let ev = match self.rx.recv() {
                 Ok(ev) => ev,
                 Err(_) => break, // channel closed => shutdown
             };
 
-            match ev {
-                ConsensusEvent::ProposalReceived { proposal } => self.handle_proposal(proposal),
-                ConsensusEvent::VoteReceived { vote } => self.handle_vote(vote),
+            self.process_event(ev);
 
-                ConsensusEvent::TimeoutPropose { height, round } => {
-                    self.handle_timeout_propose(height, round)
-                }
-                ConsensusEvent::TimeoutPrevote { height, round } => {
-                    self.handle_timeout_prevote(height, round)
-                }
-                ConsensusEvent::TimeoutPrecommit { height, round } => {
-                    self.handle_timeout_precommit(height, round)
-                }
+            // 2. Batch processing: drain any additional events available without blocking
+            while let Ok(ev) = self.rx.try_recv() {
+                self.process_event(ev);
+            }
+        }
+    }
 
-                ConsensusEvent::TxsAvailable { txs } => self.handle_txs_available(txs),
+    fn process_event(&mut self, ev: ConsensusEvent) {
+        match ev {
+            ConsensusEvent::ProposalReceived { proposal } => self.handle_proposal(proposal),
+            ConsensusEvent::VoteReceived { vote } => self.handle_vote(vote),
 
-                ConsensusEvent::BlockExecuted { height, state_root } => {
-                    self.handle_block_executed(height, state_root)
-                }
+            ConsensusEvent::TimeoutPropose { height, round } => {
+                self.handle_timeout_propose(height, round)
+            }
+            ConsensusEvent::TimeoutPrevote { height, round } => {
+                self.handle_timeout_prevote(height, round)
+            }
+            ConsensusEvent::TimeoutPrecommit { height, round } => {
+                self.handle_timeout_precommit(height, round)
+            }
+
+            ConsensusEvent::TxsAvailable { txs } => self.handle_txs_available(txs),
+
+            ConsensusEvent::BlockExecuted { height, state_root, validator_updates } => {
+                self.handle_block_executed(height, state_root, validator_updates)
             }
         }
     }
@@ -158,30 +180,53 @@ impl ConsensusCore {
     }
 
     fn proposer_for(&self, h: u64, r: u32) -> ValidatorId {
-        let steps = selection_steps(h, r);
-        select_proposer(&self.validator_set, steps)
+        select_proposer(&self.validator_set, h, r)
+    }
+
+    // -------------------------------------------------------
+    // State transitions
+    // -------------------------------------------------------
+
+    fn enter_new_height(&mut self) {
+        self.step = Step::NewHeight;
+        self.round = 0;
+        self.locked_round = None;
+        self.locked_block = None;
+        self.valid_round = None;
+        self.valid_block = None;
+        self.proposal = None;
+        self.votes = VoteSet::new(self.height);
+        self.prevoted_this_round = false;
+        self.precommitted_this_round = false;
+
+        // Immediately enter Propose for round 0
+        self.enter_propose();
+    }
+
+    fn enter_round(&mut self, round: u32) {
+        self.round = round;
+        self.proposal = None;
+        self.awaiting_txs = false;
+        self.prevoted_this_round = false;
+        self.precommitted_this_round = false;
+        // DO NOT reset locked/valid across rounds
+        self.enter_propose();
     }
 
     fn enter_propose(&mut self) {
         self.step = Step::Propose;
-        self.proposal = None;
         self.awaiting_txs = false;
 
         let proposer = self.proposer_for(self.height, self.round);
         if proposer == self.my_id {
-            // If valid_block is set -> re-propose it with valid_round
-            if let Some(vb) = self.valid_block {
-                // We don't store full block by hash here; outer shell should.
-                // For MVP skeleton, we just request txs to rebuild, or outer shell can inject full block later.
-                // We'll request txs; when you add block cache, you can re-propose exact block.
+            if self.valid_block.is_some() {
+                // Re-propose valid_block; for MVP we request txs to rebuild
                 self.awaiting_txs = true;
                 self.tx_cmd
                     .send(ConsensusCommand::ReapTxs {
                         max_bytes: self.cfg.max_reap_bytes,
                     })
                     .ok();
-                // NOTE: We'll set valid_round in proposal once we actually build.
-                let _ = vb;
             } else {
                 self.awaiting_txs = true;
                 self.tx_cmd
@@ -198,19 +243,27 @@ impl ConsensusCore {
     fn enter_prevote(&mut self) {
         self.step = Step::Prevote;
 
-        let vote_hash = self.compute_prevote();
-        self.broadcast_vote(VoteType::Prevote, vote_hash);
+        if !self.prevoted_this_round {
+            self.prevoted_this_round = true;
+            let vote_hash = self.compute_prevote();
+            self.broadcast_vote(VoteType::Prevote, vote_hash);
+        }
 
-        self.schedule_timeout(TimeoutKind::Prevote);
+        // Check if we already have enough prevotes to move to precommit
+        self.check_prevote_quorums();
     }
 
     fn enter_precommit(&mut self) {
         self.step = Step::Precommit;
 
-        let vote_hash = self.compute_precommit();
-        self.broadcast_vote(VoteType::Precommit, vote_hash);
+        if !self.precommitted_this_round {
+            self.precommitted_this_round = true;
+            let vote_hash = self.compute_precommit();
+            self.broadcast_vote(VoteType::Precommit, vote_hash);
+        }
 
-        self.schedule_timeout(TimeoutKind::Precommit);
+        // Check if we already have enough precommits to commit
+        self.check_commit_quorum();
     }
 
     fn schedule_timeout(&mut self, kind: TimeoutKind) {
@@ -232,6 +285,10 @@ impl ConsensusCore {
             .ok();
     }
 
+    // -------------------------------------------------------
+    // Event handlers
+    // -------------------------------------------------------
+
     fn handle_proposal(&mut self, sp: SignedProposal) {
         if !(self.deps.verify_proposal_sig)(&sp) {
             return;
@@ -242,14 +299,13 @@ impl ConsensusCore {
             return;
         }
 
-        // Only accept first proposal for round (can extend with equivocation evidence for proposers later)
+        // Only accept first proposal for round
         if self.proposal.is_some() {
             return;
         }
 
         // Basic block validity check (consensus-level)
         if !(self.deps.validate_block)(&p.block) {
-            // invalid proposal -> ignore, timeout will drive nil prevote
             return;
         }
 
@@ -259,6 +315,11 @@ impl ConsensusCore {
         if self.step == Step::Propose {
             self.enter_prevote();
         }
+
+        // If we're in Prevote and already have a polka for this proposal, re-check
+        if self.step == Step::Prevote {
+            self.check_prevote_quorums();
+        }
     }
 
     fn handle_vote(&mut self, sv: SignedVote) {
@@ -266,31 +327,41 @@ impl ConsensusCore {
             return;
         }
 
-        // Vote validity: height matches; validator is in set handled by VoteSet.insert_vote
-        if sv.vote.height != self.height {
-            return;
+        // Stale event handling per doc 12 section 10
+        if sv.vote.height < self.height {
+            return; // already committed
         }
+        if sv.vote.height > self.height {
+            return; // future height, ignore for now (block sync would handle)
+        }
+
+        // Check for round skip (doc 12 section 5.2):
+        // If >1/3 votes at a higher round, skip to that round
+        let vote_round = sv.vote.round;
 
         let _ = self.votes.insert_vote(&self.validator_set, sv);
 
-        // After any vote, check if we can progress.
+        // Round skip check: if vote is from a higher round
+        if vote_round > self.round {
+            self.check_round_skip(vote_round);
+        }
+
+        // Cross-state commit check (doc 12 section 5.1):
+        // If at any point we have >2/3 precommits for a block, commit it
+        self.check_any_round_commit();
+
+        // After any vote, check if we can progress in current round
         match self.step {
-            Step::Propose | Step::Prevote => {
-                // if we have a polka (any), move to precommit
-                if self.votes.has_polka_any(&self.validator_set, self.round) {
-                    // if we aren't already in precommit, go there
-                    if self.step != Step::Precommit {
-                        self.enter_precommit();
-                    }
-                }
+            Step::Propose => {
+                // Votes buffered; if polka formed, we'll catch it when entering prevote
+            }
+            Step::Prevote => {
+                self.check_prevote_quorums();
             }
             Step::Precommit => {
-                // check commit quorum for a block
-                if let Some((bh, _power)) = self.find_precommit_quorum_block(self.round) {
-                    self.commit_block_hash(bh);
-                }
+                self.check_commit_quorum();
             }
-            Step::Commit => {}
+            Step::Commit | Step::NewHeight => {}
         }
     }
 
@@ -324,10 +395,7 @@ impl ConsensusCore {
             return;
         }
         // No commit => next round
-        self.round = self.round.saturating_add(1);
-        self.step = Step::Propose;
-        // DO NOT reset locked/valid across rounds
-        self.enter_propose();
+        self.enter_round(self.round.saturating_add(1));
     }
 
     fn handle_txs_available(&mut self, txs: Vec<Vec<u8>>) {
@@ -340,7 +408,6 @@ impl ConsensusCore {
         }
 
         // Build a block deterministically from tx ordering (proposer-defined).
-        // Note: prev_block_hash/state_root/tx_merkle_root will be filled later by state/storage layer.
         let block = Block {
             header: crate::types::BlockHeader {
                 height: self.height,
@@ -355,7 +422,6 @@ impl ConsensusCore {
         };
 
         if !self.cfg.allow_empty_blocks && block.txs.is_empty() {
-            // If empty blocks disabled, just let timeouts advance rounds.
             self.awaiting_txs = false;
             return;
         }
@@ -389,7 +455,12 @@ impl ConsensusCore {
         }
     }
 
-    fn handle_block_executed(&mut self, height: u64, state_root: Hash) {
+    fn handle_block_executed(
+        &mut self,
+        height: u64,
+        state_root: Hash,
+        validator_updates: Vec<ValidatorUpdate>,
+    ) {
         if self.step != Step::Commit {
             return;
         }
@@ -398,8 +469,6 @@ impl ConsensusCore {
         }
 
         // Persist command (outer shell will do actual storage)
-        // We need the committed block; for skeleton, we take it from proposal
-        // (in real impl, committed block comes from block cache).
         if let Some(sp) = &self.proposal {
             self.tx_cmd
                 .send(ConsensusCommand::PersistBlock {
@@ -411,25 +480,121 @@ impl ConsensusCore {
 
         // Advance height
         self.height = self.height.saturating_add(1);
-        self.round = 0;
-        self.step = Step::Propose;
 
-        // Reset locking/valid for new height
-        self.locked_round = None;
-        self.locked_block = None;
-        self.valid_round = None;
-        self.valid_block = None;
-        self.proposal = None;
-        self.votes = VoteSet::new(self.height);
+        // Apply validator set updates at H+1 (doc 8 section 3)
+        if !validator_updates.is_empty() {
+            match self.validator_set.apply_updates(&validator_updates, &self.validator_set_policy) {
+                Ok(new_set) => {
+                    self.validator_set = new_set;
+                }
+                Err(e) => {
+                    // Safety rules violated; keep old validator set.
+                    // In production, this should be logged/alerted.
+                    eprintln!("validator set update rejected: {}", e);
+                }
+            }
+        }
 
-        // validator set updates apply here later (H+1) once you wire BlockExecuted with updates.
-
-        self.enter_propose();
+        self.enter_new_height();
     }
 
-    // ---------------------------
+    // -------------------------------------------------------
+    // Quorum checks
+    // -------------------------------------------------------
+
+    /// Cross-state commit: check ALL rounds for a precommit quorum (doc 12 section 5.1)
+    fn check_any_round_commit(&mut self) {
+        if self.step == Step::Commit || self.step == Step::NewHeight {
+            return;
+        }
+
+        // Check all rounds we have votes for
+        for round in 0..=self.round.saturating_add(10) {
+            if let Some((bh, _)) = self.find_precommit_quorum_block(round) {
+                self.commit_block_hash(bh, round);
+                return;
+            }
+        }
+    }
+
+    /// Check if >1/3 of voting power has votes at a higher round (doc 12 section 5.2)
+    fn check_round_skip(&mut self, target_round: u32) {
+        if target_round <= self.round {
+            return;
+        }
+        if self.step == Step::Commit {
+            return;
+        }
+
+        // Count total voting power at target_round (prevotes + precommits)
+        let mut power = 0u64;
+        let mut seen = std::collections::BTreeSet::new();
+
+        for sv in self.votes.round_votes(target_round, VoteType::Prevote) {
+            if seen.insert(sv.vote.validator) {
+                power = power.saturating_add(self.validator_set.voting_power(&sv.vote.validator));
+            }
+        }
+        for sv in self.votes.round_votes(target_round, VoteType::Precommit) {
+            if seen.insert(sv.vote.validator) {
+                power = power.saturating_add(self.validator_set.voting_power(&sv.vote.validator));
+            }
+        }
+
+        // >1/3 threshold
+        let skip_threshold = self.validator_set.total_power() / 3 + 1;
+        if power >= skip_threshold {
+            self.enter_round(target_round);
+        }
+    }
+
+    fn check_prevote_quorums(&mut self) {
+        if self.step != Step::Prevote {
+            return;
+        }
+
+        // Check for polka for a specific block
+        if let Some((_bh, _)) = self.find_prevote_polka_block(self.round) {
+            self.enter_precommit();
+            return;
+        }
+
+        // Check for polka for nil
+        if self.votes.has_polka_for(&self.validator_set, self.round, None) {
+            self.enter_precommit();
+            return;
+        }
+
+        // Check for polka any (>2/3 total prevotes) -> schedule timeout_prevote
+        if self.votes.has_polka_any(&self.validator_set, self.round) {
+            self.schedule_timeout(TimeoutKind::Prevote);
+        }
+    }
+
+    fn check_commit_quorum(&mut self) {
+        if self.step != Step::Precommit {
+            return;
+        }
+
+        if let Some((bh, _)) = self.find_precommit_quorum_block(self.round) {
+            self.commit_block_hash(bh, self.round);
+            return;
+        }
+
+        // Check for >2/3 precommits total (any value) -> schedule timeout_precommit
+        let thr = VoteSet::quorum_threshold(self.validator_set.total_power());
+        let mut total = 0u64;
+        for sv in self.votes.round_votes(self.round, VoteType::Precommit) {
+            total = total.saturating_add(self.validator_set.voting_power(&sv.vote.validator));
+        }
+        if total >= thr {
+            self.schedule_timeout(TimeoutKind::Precommit);
+        }
+    }
+
+    // -------------------------------------------------------
     // Voting logic from the docs
-    // ---------------------------
+    // -------------------------------------------------------
 
     fn compute_prevote(&self) -> Option<Hash> {
         let sp = match &self.proposal {
@@ -463,7 +628,6 @@ impl ConsensusCore {
                     return Some(bh);
                 }
             } else {
-                // locked_round None shouldn't happen if locked_block Some, but keep safe
                 if self.votes.has_polka_for(&self.validator_set, vr, Some(bh)) {
                     return Some(bh);
                 }
@@ -481,7 +645,6 @@ impl ConsensusCore {
 
             // If have full block and valid => lock and precommit B, else nil
             if (self.deps.have_full_block)(bh) {
-                // We don't have direct block by hash here; assume proposal block matches
                 if let Some(sp) = &self.proposal {
                     let ph = (self.deps.block_hash)(&sp.proposal.block);
                     if ph == bh && (self.deps.validate_block)(&sp.proposal.block) {
@@ -522,13 +685,11 @@ impl ConsensusCore {
             .ok();
     }
 
-    // ---------------------------
+    // -------------------------------------------------------
     // Quorum helpers
-    // ---------------------------
+    // -------------------------------------------------------
 
     fn find_prevote_polka_block(&self, round: u32) -> Option<(Hash, u64)> {
-        // Determine if any specific block hash has quorum of prevotes
-        // We aggregate by hash deterministically using BTreeMap.
         use std::collections::BTreeMap;
 
         let thr = VoteSet::quorum_threshold(self.validator_set.total_power());
@@ -570,12 +731,23 @@ impl ConsensusCore {
         None
     }
 
-    fn commit_block_hash(&mut self, bh: Hash) {
-        // Must have >2/3 precommits for bh at this round (checked before calling)
+    fn commit_block_hash(&mut self, bh: Hash, round: u32) {
         self.step = Step::Commit;
+        self.round = round;
+
+        // Cancel all pending timeouts for this height
+        self.tx_cmd
+            .send(ConsensusCommand::CancelTimeout {
+                timeout: Timeout {
+                    height: self.height,
+                    round: self.round,
+                    kind: TimeoutKind::Propose,
+                    duration_ms: 0,
+                },
+            })
+            .ok();
 
         // Emit ExecuteBlock command; state machine will reply BlockExecuted
-        // We need the block; take from current proposal as skeleton.
         if let Some(sp) = &self.proposal {
             let ph = (self.deps.block_hash)(&sp.proposal.block);
             if ph == bh {
@@ -584,9 +756,8 @@ impl ConsensusCore {
                         block: sp.proposal.block.clone(),
                     })
                     .ok();
-            } else {
-                // In real impl: fetch from block store/cache by hash
             }
+            // In real impl: fetch from block store/cache by hash if proposal doesn't match
         }
     }
 }

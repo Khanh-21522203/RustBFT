@@ -5,12 +5,14 @@ pub enum DecodedTx {
     Transfer(TransferTx),
     ContractDeploy(ContractDeployTx),
     ContractCall(ContractCallTx),
+    ValidatorUpdate(ValidatorUpdateTx),
 }
 
 /// TxType (1 byte)
 /// 0x01 Transfer
 /// 0x02 ContractDeploy
 /// 0x03 ContractCall
+/// 0x04 ValidatorUpdate
 ///
 /// All integers are big-endian fixed-width.
 /// All bytes fields are length-prefixed: u32 BE length + data.
@@ -57,6 +59,19 @@ pub struct ContractCallTx {
     pub signature: [u8; 64],
 }
 
+/// Validator update tx: admin-authorized, processed during EndBlock.
+/// action: 0x01=Add, 0x02=Remove, 0x03=UpdatePower
+#[derive(Clone, Debug)]
+pub struct ValidatorUpdateTx {
+    pub from: Address,
+    pub action: u8,            // 0x01 Add, 0x02 Remove, 0x03 UpdatePower
+    pub validator_id: [u8; 32],
+    pub new_power: u64,        // 0 for Remove
+    pub nonce: u64,
+    pub gas_limit: u64,
+    pub signature: [u8; 64],
+}
+
 pub fn decode_tx(bytes: &[u8]) -> Result<DecodedTx, TxDecodeError> {
     if bytes.is_empty() {
         return Err(TxDecodeError::TooShort);
@@ -68,6 +83,7 @@ pub fn decode_tx(bytes: &[u8]) -> Result<DecodedTx, TxDecodeError> {
         0x01 => DecodedTx::Transfer(decode_transfer(&mut b)?),
         0x02 => DecodedTx::ContractDeploy(decode_deploy(&mut b)?),
         0x03 => DecodedTx::ContractCall(decode_call(&mut b)?),
+        0x04 => DecodedTx::ValidatorUpdate(decode_validator_update(&mut b)?),
         other => return Err(TxDecodeError::UnknownType(other)),
     };
 
@@ -133,6 +149,28 @@ fn decode_call(b: &mut &[u8]) -> Result<ContractCallTx, TxDecodeError> {
     })
 }
 
+fn decode_validator_update(b: &mut &[u8]) -> Result<ValidatorUpdateTx, TxDecodeError> {
+    let from = Address(take_20(b)?);
+    if b.is_empty() { return Err(TxDecodeError::TooShort); }
+    let action = b[0];
+    *b = &b[1..];
+    let validator_id = take_32(b)?;
+    let new_power = take_u64(b)?;
+    let nonce = take_u64(b)?;
+    let gas_limit = take_u64(b)?;
+    let signature = take_64(b)?;
+
+    Ok(ValidatorUpdateTx {
+        from,
+        action,
+        validator_id,
+        new_power,
+        nonce,
+        gas_limit,
+        signature,
+    })
+}
+
 // --------- canonical readers ----------
 
 fn take_20(b: &mut &[u8]) -> Result<[u8; 20], TxDecodeError> {
@@ -142,6 +180,16 @@ fn take_20(b: &mut &[u8]) -> Result<[u8; 20], TxDecodeError> {
     let mut out = [0u8; 20];
     out.copy_from_slice(&b[..20]);
     *b = &b[20..];
+    Ok(out)
+}
+
+fn take_32(b: &mut &[u8]) -> Result<[u8; 32], TxDecodeError> {
+    if b.len() < 32 {
+        return Err(TxDecodeError::TooShort);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&b[..32]);
+    *b = &b[32..];
     Ok(out)
 }
 

@@ -1,7 +1,8 @@
 use crate::types::{Address, Hash};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Account {
     pub address: Address,
     pub balance: u128,
@@ -22,7 +23,7 @@ impl Account {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChainParams {
     pub max_block_gas: u64,
     pub max_tx_bytes: u32,
@@ -55,12 +56,14 @@ enum Key {
     Storage(Address, Vec<u8>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppState {
     pub accounts: BTreeMap<Address, Account>,
     pub contract_code: BTreeMap<Hash, Vec<u8>>,
+    #[serde(serialize_with = "ser_storage", deserialize_with = "de_storage")]
     pub contract_storage: BTreeMap<(Address, Vec<u8>), Vec<u8>>,
     pub params: ChainParams,
+    #[serde(skip)]
     stack: Vec<Vec<StateChange>>,
 }
 
@@ -157,6 +160,37 @@ impl AppState {
             }
         }
     }
+}
+
+/// Custom serde for BTreeMap<(Address, Vec<u8>), Vec<u8>> since tuple keys
+/// cannot be directly serialized as JSON map keys.
+fn ser_storage<S>(
+    map: &BTreeMap<(Address, Vec<u8>), Vec<u8>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(map.len()))?;
+    for ((addr, key), val) in map {
+        seq.serialize_element(&(addr, key, val))?;
+    }
+    seq.end()
+}
+
+fn de_storage<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<(Address, Vec<u8>), Vec<u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<(Address, Vec<u8>, Vec<u8>)> = Deserialize::deserialize(deserializer)?;
+    let mut map = BTreeMap::new();
+    for (addr, key, val) in entries {
+        map.insert((addr, key), val);
+    }
+    Ok(map)
 }
 
 fn encode_account(a: &Account) -> Vec<u8> {

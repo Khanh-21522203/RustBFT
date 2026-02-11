@@ -1,9 +1,9 @@
 use crate::contracts::{CallContext, ContractError, ContractRuntime};
 use crate::crypto::hash::sha256;
-use crate::state::accounts::{Account, AppState};
+use crate::state::accounts::AppState;
 use crate::state::merkle::compute_state_root;
 use crate::state::tx::{decode_tx, DecodedTx, TxDecodeError};
-use crate::types::{Address, Block, Hash};
+use crate::types::{Address, Block, Hash, ValidatorId, ValidatorUpdate};
 
 #[derive(Clone, Debug)]
 pub struct GasSchedule {
@@ -48,13 +48,13 @@ impl StateExecutor {
     }
 
     /// Execute committed block synchronously (no async, no IO).
-    /// Returns computed state_root.
+    /// Returns (state_root, validator_updates).
     pub fn execute_block(
         &self,
         state: &mut AppState,
         contracts: &mut ContractRuntime,
         block: &Block,
-    ) -> Result<Hash, anyhow::Error> {
+    ) -> Result<(Hash, Vec<ValidatorUpdate>), anyhow::Error> {
         // BeginBlock (MVP no-op)
         self.begin_block(state, block)?;
 
@@ -68,19 +68,16 @@ impl StateExecutor {
         }
 
         let mut gas_used_total: u64 = 0;
+        let mut pending_val_updates: Vec<crate::state::tx::ValidatorUpdateTx> = Vec::new();
 
         for tx_bytes in block.txs.iter() {
             if (tx_bytes.len() as u32) > state.params.max_tx_bytes {
-                // If tx is too large, drop it deterministically (cannot even decode sender).
                 continue;
             }
 
-            let gas_used = match self.execute_one_tx(state, contracts, block, tx_bytes) {
+            let gas_used = match self.execute_one_tx(state, contracts, block, tx_bytes, &mut pending_val_updates) {
                 Ok(g) => g,
-                Err(_) => {
-                    // If decode fails and we cannot know sender, we do nothing deterministically.
-                    0
-                }
+                Err(_) => 0,
             };
 
             gas_used_total = gas_used_total.saturating_add(gas_used);
@@ -89,19 +86,39 @@ impl StateExecutor {
             }
         }
 
-        // EndBlock (MVP no-op; validator update tx later)
-        self.end_block(state, block)?;
+        // EndBlock: process validator updates collected during DeliverTx
+        let validator_updates = self.end_block(state, &pending_val_updates)?;
 
         // Commit: compute root after execution
-        Ok(compute_state_root(state))
+        let state_root = compute_state_root(state);
+        Ok((state_root, validator_updates))
     }
 
     fn begin_block(&self, _state: &mut AppState, _block: &Block) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
-    fn end_block(&self, _state: &mut AppState, _block: &Block) -> Result<(), anyhow::Error> {
-        Ok(())
+    /// EndBlock: convert pending validator update txs into ValidatorUpdate structs.
+    /// These are returned to consensus which applies them at H+1.
+    fn end_block(
+        &self,
+        _state: &mut AppState,
+        pending: &[crate::state::tx::ValidatorUpdateTx],
+    ) -> Result<Vec<ValidatorUpdate>, anyhow::Error> {
+        let mut updates = Vec::new();
+        for vtx in pending {
+            let new_power = match vtx.action {
+                0x01 => vtx.new_power, // Add
+                0x02 => 0,             // Remove
+                0x03 => vtx.new_power, // UpdatePower
+                _ => continue,         // Unknown action, skip
+            };
+            updates.push(ValidatorUpdate {
+                id: ValidatorId(vtx.validator_id),
+                new_power,
+            });
+        }
+        Ok(updates)
     }
 
     fn execute_one_tx(
@@ -110,6 +127,7 @@ impl StateExecutor {
         contracts: &mut ContractRuntime,
         block: &Block,
         tx_bytes: &[u8],
+        pending_val_updates: &mut Vec<crate::state::tx::ValidatorUpdateTx>,
     ) -> Result<u64, ExecError> {
         let decoded = decode_tx(tx_bytes)?;
 
@@ -117,6 +135,22 @@ impl StateExecutor {
             DecodedTx::Transfer(t) => Ok(self.exec_transfer(state, t)),
             DecodedTx::ContractDeploy(t) => Ok(self.exec_deploy(state, contracts, block, t)?),
             DecodedTx::ContractCall(t) => Ok(self.exec_call(state, contracts, block, t)?),
+            DecodedTx::ValidatorUpdate(t) => {
+                // Validator update txs are collected and processed in EndBlock.
+                // Charge intrinsic gas now; actual update happens in end_block.
+                let intrinsic = self.gas.base_tx.saturating_add(self.gas.sig_verify);
+                let charge = intrinsic.min(t.gas_limit);
+                self.charge_gas(state, t.from, charge);
+                // Increment sender nonce
+                let mut sender = state.get_account(t.from);
+                if sender.nonce != t.nonce {
+                    return Err(ExecError::BadNonce);
+                }
+                sender.nonce = sender.nonce.saturating_add(1);
+                state.set_account(sender);
+                pending_val_updates.push(t);
+                Ok(charge)
+            }
         }
     }
 
