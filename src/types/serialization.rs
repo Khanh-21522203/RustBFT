@@ -149,7 +149,7 @@ pub fn decode_block(data: &[u8]) -> Result<Block, CodecError> {
     for _ in 0..n {
         txs.push(d.get_vec()?);
     }
-    Ok(Block { header, txs })
+    Ok(Block { header, txs, last_commit: None })
 }
 
 fn encode_block_header(e: &mut Encoder, h: &BlockHeader) {

@@ -67,7 +67,7 @@ impl ProposerState {
 /// Height is incorporated so different heights pick different proposers at round 0.
 pub fn select_proposer(vset: &ValidatorSet, height: u64, round: u32) -> ValidatorId {
     let mut state = ProposerState::new(vset);
-    let total_steps = height.saturating_add(round as u64).saturating_add(1);
+    let total_steps = selection_steps(height, round);
     let mut last = vset.ids_in_order().next().copied().expect("non-empty");
     for _ in 0..total_steps {
         last = state.next_proposer(vset);

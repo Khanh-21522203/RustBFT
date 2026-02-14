@@ -12,5 +12,5 @@ pub use address::Address;
 pub use validator::{ValidatorId, Validator, ValidatorSet, ValidatorUpdate, ValidatorSetPolicy, ValidatorSetError};
 pub use vote::{VoteType, Vote, SignedVote, Evidence};
 pub use proposal::{Proposal, SignedProposal};
-pub use block::{Block, BlockHeader};
+pub use block::{Block, BlockHeader, CommitInfo};
 pub use transaction::*;

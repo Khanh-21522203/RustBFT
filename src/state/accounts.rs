@@ -58,7 +58,9 @@ enum Key {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppState {
+    #[serde(serialize_with = "ser_accounts", deserialize_with = "de_accounts")]
     pub accounts: BTreeMap<Address, Account>,
+    #[serde(serialize_with = "ser_code", deserialize_with = "de_code")]
     pub contract_code: BTreeMap<Hash, Vec<u8>>,
     #[serde(serialize_with = "ser_storage", deserialize_with = "de_storage")]
     pub contract_storage: BTreeMap<(Address, Vec<u8>), Vec<u8>>,
@@ -79,8 +81,9 @@ impl AppState {
     }
 
     pub fn snapshot(&mut self) -> SnapshotId {
+        let id = SnapshotId(self.stack.len());
         self.stack.push(Vec::new());
-        SnapshotId(self.stack.len())
+        id
     }
 
     pub fn revert_to(&mut self, id: SnapshotId) {
@@ -129,6 +132,14 @@ impl AppState {
         self.apply_raw(key, Some(&v));
     }
 
+    pub fn delete_storage(&mut self, addr: Address, k: Vec<u8>) {
+        let key = Key::Storage(addr, k.clone());
+        let old = self.contract_storage.get(&(addr, k)).cloned();
+
+        self.record_change(key.clone(), old);
+        self.apply_raw(key, None);
+    }
+
     fn record_change(&mut self, key: Key, old: Option<Vec<u8>>) {
         if let Some(frame) = self.stack.last_mut() {
             frame.push(StateChange { key, old });
@@ -160,6 +171,46 @@ impl AppState {
             }
         }
     }
+}
+
+fn ser_accounts<S>(map: &BTreeMap<Address, Account>, serializer: S) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(map.len()))?;
+    for acc in map.values() {
+        seq.serialize_element(acc)?;
+    }
+    seq.end()
+}
+
+fn de_accounts<'de, D>(deserializer: D) -> Result<BTreeMap<Address, Account>, D::Error>
+where D: serde::Deserializer<'de> {
+    let accs: Vec<Account> = Deserialize::deserialize(deserializer)?;
+    let mut map = BTreeMap::new();
+    for acc in accs {
+        map.insert(acc.address, acc);
+    }
+    Ok(map)
+}
+
+fn ser_code<S>(map: &BTreeMap<Hash, Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(map.len()))?;
+    for (hash, code) in map {
+        seq.serialize_element(&(hash, code))?;
+    }
+    seq.end()
+}
+
+fn de_code<'de, D>(deserializer: D) -> Result<BTreeMap<Hash, Vec<u8>>, D::Error>
+where D: serde::Deserializer<'de> {
+    let entries: Vec<(Hash, Vec<u8>)> = Deserialize::deserialize(deserializer)?;
+    let mut map = BTreeMap::new();
+    for (hash, code) in entries {
+        map.insert(hash, code);
+    }
+    Ok(map)
 }
 
 /// Custom serde for BTreeMap<(Address, Vec<u8>), Vec<u8>> since tuple keys

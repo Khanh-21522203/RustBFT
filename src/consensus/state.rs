@@ -1,6 +1,7 @@
 use crate::consensus::events::{ConsensusCommand, ConsensusEvent, Timeout, TimeoutKind};
 use crate::consensus::proposer::select_proposer;
 use crate::consensus::vote_set::VoteSet;
+use crate::storage::wal::{WalEntry, WalEntryKind};
 use crate::types::{
     Block, Hash, SignedProposal, SignedVote, ValidatorId, ValidatorSet, ValidatorSetPolicy,
     ValidatorUpdate, Vote, VoteType,
@@ -309,7 +310,10 @@ impl ConsensusCore {
             return;
         }
 
-        self.proposal = Some(sp);
+        self.proposal = Some(sp.clone());
+
+        // WAL: record received proposal for crash recovery
+        self.wal_write(WalEntryKind::Proposal, &serde_json::to_vec(&sp).unwrap_or_default());
 
         // On receiving proposal while in Propose step, enter Prevote immediately.
         if self.step == Step::Propose {
@@ -339,7 +343,24 @@ impl ConsensusCore {
         // If >1/3 votes at a higher round, skip to that round
         let vote_round = sv.vote.round;
 
-        let _ = self.votes.insert_vote(&self.validator_set, sv);
+        match self.votes.insert_vote(&self.validator_set, sv) {
+            Ok(()) => {}
+            Err(crate::consensus::vote_set::VoteSetError::Duplicate) => return,
+            Err(crate::consensus::vote_set::VoteSetError::Equivocation) => {
+                // Log equivocation evidence (doc 12 section 10)
+                let evidence = self.votes.evidence();
+                if let Some(ev) = evidence.last() {
+                    eprintln!(
+                        "EQUIVOCATION DETECTED: validator {:?} at height={} round={}",
+                        ev.vote_a.vote.validator, ev.vote_a.vote.height, ev.vote_a.vote.round
+                    );
+                }
+                return;
+            }
+            Err(crate::consensus::vote_set::VoteSetError::HeightMismatch) => return,
+            Err(crate::consensus::vote_set::VoteSetError::NonValidator) => return,
+            Err(crate::consensus::vote_set::VoteSetError::UnexpectedVoteType) => return,
+        }
 
         // Round skip check: if vote is from a higher round
         if vote_round > self.round {
@@ -419,6 +440,7 @@ impl ConsensusCore {
                 tx_merkle_root: Hash::ZERO,
             },
             txs,
+            last_commit: None, // MVP: commit info will be populated by outer shell
         };
 
         if !self.cfg.allow_empty_blocks && block.txs.is_empty() {
@@ -680,8 +702,30 @@ impl ConsensusCore {
             vote: v,
             signature: [0u8; 64], // outer shell will sign
         };
+
+        // WAL: record our vote before broadcasting
+        let wal_kind = match vote_type {
+            VoteType::Prevote => WalEntryKind::Prevote,
+            VoteType::Precommit => WalEntryKind::Precommit,
+        };
+        self.wal_write(wal_kind, &serde_json::to_vec(&sv).unwrap_or_default());
+
         self.tx_cmd
             .send(ConsensusCommand::BroadcastVote { vote: sv })
+            .ok();
+    }
+
+    /// Write a WAL entry for crash recovery (doc 9 section 5).
+    fn wal_write(&self, kind: WalEntryKind, data: &[u8]) {
+        self.tx_cmd
+            .send(ConsensusCommand::WriteWAL {
+                entry: WalEntry {
+                    height: self.height,
+                    round: self.round,
+                    kind,
+                    data: data.to_vec(),
+                },
+            })
             .ok();
     }
 

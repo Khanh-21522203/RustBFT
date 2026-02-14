@@ -50,6 +50,7 @@ fn make_block(height: u64, proposer: ValidatorId) -> Block {
             tx_merkle_root: Hash::ZERO,
         },
         txs: vec![],
+        last_commit: None,
     }
 }
 

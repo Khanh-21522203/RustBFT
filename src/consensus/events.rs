@@ -1,3 +1,4 @@
+use crate::storage::wal::WalEntry;
 use crate::types::{Block, Hash, SignedProposal, SignedVote, ValidatorUpdate};
 
 #[derive(Clone, Debug)]
@@ -37,7 +38,7 @@ pub enum ConsensusCommand {
 
     // To storage
     PersistBlock { block: Block, state_root: Hash },
-    WriteWAL { entry: Vec<u8> },
+    WriteWAL { entry: WalEntry },
 
     // To timers
     ScheduleTimeout { timeout: Timeout },

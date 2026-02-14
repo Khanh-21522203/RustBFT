@@ -42,7 +42,7 @@ impl BlockStore {
         block: &Block,
         state_root: Hash,
         validator_set: &ValidatorSet,
-    ) -> Result<(), rocksdb::Error> {
+    ) -> Result<(), anyhow::Error> {
         let height = block.header.height;
         let key = height_key(height);
 
@@ -55,7 +55,7 @@ impl BlockStore {
         let cf_vs = self.db.cf_handle(CF_VALSET).unwrap();
         let cf_meta = self.db.cf_handle(CF_META).unwrap();
 
-        let vs_bytes = serde_json::to_vec(validator_set).unwrap_or_default();
+        let vs_bytes = serde_json::to_vec(validator_set)?;
 
         // Atomic batch write
         let mut batch = rocksdb::WriteBatch::default();

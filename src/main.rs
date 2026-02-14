@@ -7,9 +7,11 @@ use tracing::{info, error};
 
 use RustBFT::config::NodeConfig;
 use RustBFT::consensus::{
-    CommandRouter, ConsensusCommand, ConsensusConfig, ConsensusCore, ConsensusDeps,
+    ConsensusCommand, ConsensusConfig, ConsensusCore, ConsensusDeps,
     ConsensusEvent, TimerService,
 };
+use RustBFT::router::CommandRouter;
+use RustBFT::storage::wal::WAL;
 use RustBFT::contracts::ContractRuntime;
 use RustBFT::crypto::ed25519::load_or_generate_keypair;
 use RustBFT::crypto::hash::sha256;
@@ -93,8 +95,10 @@ async fn main() -> anyhow::Result<()> {
     // -------------------------------------------------------
     let blocks_path = format!("{}/blocks", cfg.node.data_dir);
     let state_path = format!("{}/state", cfg.node.data_dir);
+    let wal_path = format!("{}/consensus.wal", cfg.node.data_dir);
     let block_store = Arc::new(BlockStore::open(Path::new(&blocks_path))?);
     let state_store = Arc::new(StateStore::open(Path::new(&state_path))?);
+    let wal = Arc::new(tokio::sync::Mutex::new(WAL::open(Path::new(&wal_path))?));
 
     let last_height = block_store.last_height()?;
     let starting_height = if last_height > 0 { last_height + 1 } else { 1 };
@@ -168,7 +172,9 @@ async fn main() -> anyhow::Result<()> {
         contracts.clone(),
         block_store.clone(),
         state_store.clone(),
+        wal.clone(),
         validator_set_shared.clone(),
+        metrics.clone(),
     );
 
     tokio::spawn(async move {

@@ -59,6 +59,7 @@ impl ContractRuntime {
 
         // Determinism / sandbox knobs
         cfg.wasm_simd(false);
+        cfg.wasm_relaxed_simd(false);
         cfg.wasm_threads(false);
         cfg.consume_fuel(true);
         cfg.cranelift_nan_canonicalization(true);

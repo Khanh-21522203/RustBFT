@@ -1,11 +1,20 @@
-use crate::types::{Hash, ValidatorId};
+use crate::types::{Hash, SignedVote, ValidatorId};
 use serde::{Deserialize, Serialize};
+
+/// Commit info: >2/3 precommit signatures for the previous block (doc 8 section 8).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub height: u64,
+    pub round: u32,
+    pub block_hash: Hash,
+    pub signatures: Vec<SignedVote>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
-    pub txs: Vec<Vec<u8>>, // placeholder Transaction bytes; mempool/state will define later
-    // last_commit: CommitInfo (để sau, khi có types cho commit signatures)
+    pub txs: Vec<Vec<u8>>,
+    pub last_commit: Option<CommitInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

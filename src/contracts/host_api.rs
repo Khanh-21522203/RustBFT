@@ -147,8 +147,7 @@ pub fn add_host_functions(linker: &mut wasmtime::Linker<HostState>) -> anyhow::R
             let key = mem_read(&mut caller, key_ptr, key_len)?;
             let addr = caller.data().env.self_addr;
 
-            // Delete by writing None (we don't have a direct delete helper; do it via raw map)
-            caller.data_mut().app.contract_storage.remove(&(addr, key));
+            caller.data_mut().app.delete_storage(addr, key);
             Ok(())
         },
     )?;

@@ -1,5 +1,5 @@
 use bytes::{BufMut, BytesMut};
-use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{aead::KeyInit, ChaCha20Poly1305, Key, Nonce};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -84,46 +84,14 @@ impl PlainFramer {
     }
 }
 
+/// Post-handshake encrypted framer.
+///
+/// After handshake the TcpStream is split into OwnedReadHalf / OwnedWriteHalf
+/// for concurrent reader/writer tasks in manager.rs. Therefore this struct only
+/// serves as a container to transfer (stream, max_size, crypto) from handshake
+/// to the manager; the actual AEAD read/write is done inline on the split halves.
 pub struct EncryptedFramer {
     pub stream: TcpStream,
     pub max_size: usize,
     pub crypto: CryptoState,
-}
-
-impl EncryptedFramer {
-    pub async fn write(&mut self, ty: MsgType, payload: &[u8]) -> Result<(), NetCodecError> {
-        let mut pt = Vec::with_capacity(1 + payload.len());
-        pt.push(ty as u8);
-        pt.extend_from_slice(payload);
-        if pt.len() > self.max_size { return Err(NetCodecError::TooLarge); }
-
-        let nonce = CryptoState::nonce(self.crypto.dir_send, self.crypto.send_ctr);
-        self.crypto.send_ctr = self.crypto.send_ctr.wrapping_add(1);
-        let ct = self.crypto.aead.encrypt(&nonce, pt.as_ref()).map_err(|_| NetCodecError::AeadFailed)?;
-        if ct.len() > self.max_size { return Err(NetCodecError::TooLarge); }
-
-        let mut buf = BytesMut::with_capacity(4 + ct.len());
-        buf.put_u32(ct.len() as u32);
-        buf.extend_from_slice(&ct);
-        self.stream.write_all(&buf).await?;
-        Ok(())
-    }
-
-    pub async fn read(&mut self) -> Result<(MsgType, Vec<u8>), NetCodecError> {
-        let mut len_buf = [0u8; 4];
-        self.stream.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > self.max_size { return Err(NetCodecError::TooLarge); }
-
-        let mut ct = vec![0u8; len];
-        self.stream.read_exact(&mut ct).await?;
-
-        let nonce = CryptoState::nonce(self.crypto.dir_recv, self.crypto.recv_ctr);
-        self.crypto.recv_ctr = self.crypto.recv_ctr.wrapping_add(1);
-        let pt = self.crypto.aead.decrypt(&nonce, ct.as_ref()).map_err(|_| NetCodecError::AeadFailed)?;
-        if pt.is_empty() { return Err(NetCodecError::Protocol("empty plaintext")); }
-
-        let ty = MsgType::from_u8(pt[0]).ok_or(NetCodecError::UnknownType)?;
-        Ok((ty, pt[1..].to_vec()))
-    }
 }

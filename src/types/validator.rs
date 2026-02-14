@@ -61,10 +61,33 @@ pub enum ValidatorSetError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorSet {
     // Deterministic iteration order, no HashMap.
+    // Custom serde: BTreeMap<ValidatorId, Validator> cannot be a JSON map key,
+    // so we serialize as Vec<Validator> and reconstruct on deserialize.
+    #[serde(serialize_with = "ser_validators", deserialize_with = "de_validators")]
     validators: BTreeMap<ValidatorId, Validator>,
     total_power: u64,
     // Hash of validator set used in BlockHeader
     pub set_hash: Hash,
+}
+
+fn ser_validators<S>(map: &BTreeMap<ValidatorId, Validator>, serializer: S) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(map.len()))?;
+    for v in map.values() {
+        seq.serialize_element(v)?;
+    }
+    seq.end()
+}
+
+fn de_validators<'de, D>(deserializer: D) -> Result<BTreeMap<ValidatorId, Validator>, D::Error>
+where D: serde::Deserializer<'de> {
+    let vals: Vec<Validator> = Deserialize::deserialize(deserializer)?;
+    let mut map = BTreeMap::new();
+    for v in vals {
+        map.insert(v.id, v);
+    }
+    Ok(map)
 }
 
 impl ValidatorSet {
