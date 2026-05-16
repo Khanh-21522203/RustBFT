@@ -1,0 +1,13 @@
+[package]
+name = "rustbft-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

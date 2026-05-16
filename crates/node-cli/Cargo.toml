@@ -1,0 +1,20 @@
+[package]
+name = "rustbft-node-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustbft-core = { path = "../core" }
+rustbft-consensus = { path = "../consensus" }
+rustbft-node = { path = "../node" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossbeam-channel = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+rustbft-core = { path = "../core" }
+rustbft-consensus = { path = "../consensus" }
+rustbft-node = { path = "../node" }

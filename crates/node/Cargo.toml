@@ -1,0 +1,28 @@
+[package]
+name = "rustbft-node"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustbft-core = { path = "../core" }
+rustbft-consensus = { path = "../consensus" }
+tokio = { workspace = true }
+axum = { workspace = true }
+prometheus-client = { workspace = true }
+wasmtime = { workspace = true }
+wasmparser = { workspace = true }
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+lru = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+crossbeam-channel = { workspace = true }
+rand_core = { workspace = true }
+redb = { workspace = true }
+bytes = "1.11.1"

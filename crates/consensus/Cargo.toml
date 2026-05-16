@@ -1,0 +1,11 @@
+[package]
+name = "rustbft-consensus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustbft-core = { path = "../core" }
+crossbeam-channel = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
