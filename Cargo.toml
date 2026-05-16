@@ -2,6 +2,7 @@
 members = [
     "crates/core",
     "crates/consensus",
+    "crates/hotstuff",
     "crates/node",
     "crates/node-cli",
 ]
@@ -55,4 +56,3 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 lru = "0.12"
 thiserror = "1"
 anyhow = "1.0.101"
-

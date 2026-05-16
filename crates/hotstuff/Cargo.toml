@@ -1,0 +1,10 @@
+[package]
+name = "rustbft-hotstuff"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustbft-core = { path = "../core" }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
