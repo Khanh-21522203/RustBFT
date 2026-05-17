@@ -6,3 +6,4 @@ pub mod p2p;
 pub mod rpc;
 pub mod metrics;
 pub mod bridge;
+pub mod staking;
