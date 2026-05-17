@@ -48,6 +48,35 @@ impl QuorumCertificate {
     pub fn has_quorum(&self, validator_set: &ValidatorSet) -> bool {
         self.voting_power(validator_set) >= Self::quorum_threshold(validator_set.total_power())
     }
+
+    pub fn validate(&self, validator_set: &ValidatorSet) -> Result<(), QuorumError> {
+        if self.signatures.is_empty() && self.block_hash == Hash::ZERO && self.view == 0 {
+            return Ok(());
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for signed in &self.signatures {
+            let vote = &signed.vote;
+            if !validator_set.contains(&vote.validator) {
+                return Err(QuorumError::NonValidator);
+            }
+            if vote.view != self.view
+                || vote.phase != self.phase
+                || vote.block_hash != self.block_hash
+            {
+                return Err(QuorumError::TargetMismatch);
+            }
+            if !seen.insert(vote.validator) {
+                return Err(QuorumError::Duplicate);
+            }
+        }
+
+        if self.has_quorum(validator_set) {
+            Ok(())
+        } else {
+            Err(QuorumError::NoQuorum)
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
