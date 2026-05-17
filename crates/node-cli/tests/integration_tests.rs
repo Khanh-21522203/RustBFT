@@ -22,6 +22,7 @@ use rustbft_node::contracts::ContractRuntime;
 use rustbft_core::crypto;
 use rustbft_core::crypto::sha256;
 use rustbft_node::metrics::registry::Metrics;
+use rustbft_node::mempool::{tx_hash_bytes, Mempool};
 use rustbft_node::p2p::msg::{decode_message, encode_message, NetworkMessage};
 use rustbft_node::bridge::CommandRouter;
 use rustbft_node::rpc::handlers::{dispatch, RpcState};
@@ -319,6 +320,7 @@ async fn test_rpc_status() {
         node_id: "test-node".to_string(),
         chain_id: "test-chain".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let req = JsonRpcRequest {
@@ -350,6 +352,7 @@ async fn test_rpc_get_block_not_found() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let req = JsonRpcRequest {
@@ -381,6 +384,7 @@ async fn test_rpc_get_block_found() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let req = JsonRpcRequest {
@@ -417,6 +421,7 @@ async fn test_rpc_get_account() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let addr_hex: String = [0xABu8; 20].iter().map(|b| format!("{:02x}", b)).collect();
@@ -447,6 +452,7 @@ async fn test_rpc_get_validators() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let req = JsonRpcRequest {
@@ -477,6 +483,7 @@ async fn test_rpc_unknown_method() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let req = JsonRpcRequest {
@@ -510,6 +517,7 @@ async fn test_rpc_get_latest_height() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     let req = JsonRpcRequest {
@@ -522,6 +530,84 @@ async fn test_rpc_get_latest_height() {
     let resp = dispatch(&rpc_state, req).await;
     assert!(resp.error.is_none());
     assert_eq!(resp.result.unwrap()["height"], 3);
+}
+
+#[tokio::test]
+async fn test_rpc_broadcast_tx_then_get_tx_pending() {
+    let dir = temp_dir("rpc_tx_pending");
+    let block_store = Arc::new(BlockStore::open(&dir.join("blocks.db")).unwrap());
+    let (vset, _) = make_vset(1);
+    let (tx_submit, _rx) = mpsc::channel(8);
+    let mempool = Arc::new(Mempool::new());
+
+    let rpc_state = RpcState {
+        block_store,
+        app_state: Arc::new(RwLock::new(AppState::new(ChainParams::default()))),
+        validator_set: Arc::new(RwLock::new(vset)),
+        node_id: "n".to_string(),
+        chain_id: "c".to_string(),
+        tx_submit,
+        mempool,
+    };
+
+    let tx = vec![0x01, 0x02, 0x03];
+    let tx_hex: String = tx.iter().map(|b| format!("{:02x}", b)).collect();
+
+    let resp = dispatch(&rpc_state, JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "broadcast_tx".to_string(),
+        params: json!({"tx": tx_hex}),
+        id: json!(1),
+    }).await;
+    assert!(resp.error.is_none());
+    let hash = resp.result.as_ref().unwrap()["hash"].as_str().unwrap().to_string();
+    assert_eq!(resp.result.as_ref().unwrap()["status"], "accepted");
+
+    let resp = dispatch(&rpc_state, JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "get_tx".to_string(),
+        params: json!({"hash": hash}),
+        id: json!(2),
+    }).await;
+    assert!(resp.error.is_none());
+    assert_eq!(resp.result.unwrap()["status"], "pending");
+}
+
+#[tokio::test]
+async fn test_rpc_get_tx_committed_from_block_index() {
+    let dir = temp_dir("rpc_tx_committed");
+    let block_store = Arc::new(BlockStore::open(&dir.join("blocks.db")).unwrap());
+    let (vset, ids) = make_vset(1);
+    let tx = vec![0xAA, 0xBB, 0xCC];
+    let tx_hash = tx_hash_bytes(&tx);
+    let mut block = make_block(7, ids[0]);
+    block.txs = vec![tx];
+    block_store.save_block(&block, Hash::ZERO, &vset).unwrap();
+
+    let (tx_submit, _rx) = mpsc::channel(1);
+    let rpc_state = RpcState {
+        block_store,
+        app_state: Arc::new(RwLock::new(AppState::new(ChainParams::default()))),
+        validator_set: Arc::new(RwLock::new(vset)),
+        node_id: "n".to_string(),
+        chain_id: "c".to_string(),
+        tx_submit,
+        mempool: Arc::new(Mempool::new()),
+    };
+
+    let hash_hex: String = tx_hash.0.iter().map(|b| format!("{:02x}", b)).collect();
+    let resp = dispatch(&rpc_state, JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "get_tx".to_string(),
+        params: json!({"hash": hash_hex}),
+        id: json!(1),
+    }).await;
+
+    assert!(resp.error.is_none());
+    let result = resp.result.unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(result["height"], 7);
+    assert_eq!(result["index"], 0);
 }
 
 // ===========================================================================
@@ -543,6 +629,7 @@ async fn test_router_storage_pipeline() {
     let app_state = Arc::new(RwLock::new(AppState::new(ChainParams::default())));
     let contracts = Arc::new(tokio::sync::Mutex::new(ContractRuntime::new().unwrap()));
     let validator_set_shared = Arc::new(RwLock::new(vset.clone()));
+    let mempool = Arc::new(Mempool::new());
 
     // Channels: we send commands, router processes them
     let (tx_ev, _rx_ev) = bounded::<ConsensusEvent>(256);
@@ -564,6 +651,7 @@ async fn test_router_storage_pipeline() {
         wal.clone(),
         validator_set_shared.clone(),
         metrics.clone(),
+        mempool.clone(),
     );
     tokio::spawn(async move { router.run().await });
 
@@ -1047,6 +1135,7 @@ async fn test_e2e_transfer_and_rpc_query() {
         node_id: "n".to_string(),
         chain_id: "c".to_string(),
         tx_submit,
+        mempool: Arc::new(Mempool::new()),
     };
 
     // Check block

@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-use crate::rpc::types::*;
 use crate::execution::accounts::AppState;
+use crate::mempool::Mempool;
+use crate::rpc::types::*;
 use crate::storage::block_store::BlockStore;
-use rustbft_core::{Address, ValidatorSet};
+use rustbft_core::{Address, Hash, ValidatorSet};
 
 /// Shared state accessible by all RPC handlers.
 pub struct RpcState {
@@ -17,12 +18,14 @@ pub struct RpcState {
     pub chain_id: String,
     /// Channel to submit transactions to the mempool.
     pub tx_submit: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub mempool: Arc<Mempool>,
 }
 
 /// Route a JSON-RPC request to the appropriate handler.
 pub async fn dispatch(state: &RpcState, req: JsonRpcRequest) -> JsonRpcResponse {
     match req.method.as_str() {
         "broadcast_tx" => handle_broadcast_tx(state, req.params, req.id).await,
+        "get_tx" => handle_get_tx(state, req.params, req.id).await,
         "get_block" => handle_get_block(state, req.params, req.id).await,
         "get_block_hash" => handle_get_block_hash(state, req.params, req.id).await,
         "get_account" => handle_get_account(state, req.params, req.id).await,
@@ -45,9 +48,65 @@ async fn handle_broadcast_tx(state: &RpcState, params: Value, id: Value) -> Json
         None => return JsonRpcResponse::error(id, ERR_INVALID_PARAMS, "invalid hex".into()),
     };
 
+    let tx_hash = state.mempool.insert(tx_bytes.clone());
+
     match state.tx_submit.try_send(tx_bytes) {
-        Ok(_) => JsonRpcResponse::success(id, json!({"status": "accepted"})),
-        Err(_) => JsonRpcResponse::error(id, ERR_INTERNAL, "mempool full".into()),
+        Ok(_) => JsonRpcResponse::success(
+            id,
+            json!({
+                "status": "accepted",
+                "hash": hex_encode(&tx_hash.0),
+            }),
+        ),
+        Err(_) => {
+            state.mempool.remove(&tx_hash);
+            JsonRpcResponse::error(id, ERR_INTERNAL, "mempool full".into())
+        }
+    }
+}
+
+/// get_tx: query async transaction finality status by tx hash.
+async fn handle_get_tx(state: &RpcState, params: Value, id: Value) -> JsonRpcResponse {
+    let hash_hex = match params.get("hash").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return JsonRpcResponse::error(id, ERR_INVALID_PARAMS, "missing 'hash'".into()),
+    };
+
+    let hash = match parse_hash(hash_hex) {
+        Some(h) => h,
+        None => return JsonRpcResponse::error(id, ERR_INVALID_PARAMS, "invalid tx hash".into()),
+    };
+
+    match state.block_store.load_tx_commit(hash) {
+        Ok(Some(info)) => JsonRpcResponse::success(
+            id,
+            json!({
+                "hash": hex_encode(&info.hash.0),
+                "status": "committed",
+                "height": info.height,
+                "index": info.index,
+                "result": {
+                    "success": info.success,
+                    "gas_used": info.gas_used,
+                    "error": info.error,
+                }
+            }),
+        ),
+        Ok(None) if state.mempool.contains(&hash) => JsonRpcResponse::success(
+            id,
+            json!({
+                "hash": hash_hex,
+                "status": "pending",
+            }),
+        ),
+        Ok(None) => JsonRpcResponse::success(
+            id,
+            json!({
+                "hash": hash_hex,
+                "status": "unknown",
+            }),
+        ),
+        Err(e) => JsonRpcResponse::error(id, ERR_INTERNAL, format!("storage error: {}", e)),
     }
 }
 
@@ -104,7 +163,13 @@ async fn handle_get_account(state: &RpcState, params: Value, id: Value) -> JsonR
             a.copy_from_slice(&b);
             Address(a)
         }
-        _ => return JsonRpcResponse::error(id, ERR_INVALID_PARAMS, "invalid address hex (20 bytes)".into()),
+        _ => {
+            return JsonRpcResponse::error(
+                id,
+                ERR_INVALID_PARAMS,
+                "invalid address hex (20 bytes)".into(),
+            );
+        }
     };
 
     let app = state.app_state.read().await;
@@ -175,4 +240,14 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         out.push(byte);
     }
     Some(out)
+}
+
+fn parse_hash(s: &str) -> Option<Hash> {
+    let bytes = hex_decode(s)?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&bytes);
+    Some(Hash(h))
 }

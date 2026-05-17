@@ -2,6 +2,7 @@ pub mod config;
 pub mod storage;
 pub mod execution;
 pub mod contracts;
+pub mod mempool;
 pub mod p2p;
 pub mod rpc;
 pub mod metrics;

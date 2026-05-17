@@ -16,6 +16,7 @@ use rustbft_node::contracts::ContractRuntime;
 use rustbft_core::crypto::{load_or_generate_keypair, sha256};
 use rustbft_node::metrics::registry::Metrics;
 use rustbft_node::metrics::server::{MetricsConfig, MetricsServer};
+use rustbft_node::mempool::Mempool;
 use rustbft_node::p2p::peer::HandshakeDeps;
 use rustbft_node::rpc::server::{RpcConfig, RpcServer};
 use rustbft_node::rpc::handlers::RpcState;
@@ -116,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
     let app_state = Arc::new(RwLock::new(app_state));
     let contracts = Arc::new(tokio::sync::Mutex::new(ContractRuntime::new()?));
     let validator_set_shared = Arc::new(RwLock::new(validator_set.clone()));
+    let mempool = Arc::new(Mempool::new());
 
     info!(validators = validator_set.len(), total_power = validator_set.total_power(), "Loading validator set");
 
@@ -175,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         wal.clone(),
         validator_set_shared.clone(),
         metrics.clone(),
+        mempool.clone(),
     );
 
     tokio::spawn(async move {
@@ -232,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
         node_id: hex_encode(&my_id.0[..8]),
         chain_id: cfg.node.chain_id.clone(),
         tx_submit,
+        mempool: mempool.clone(),
     });
 
     let rpc_server = RpcServer::new(

@@ -1,7 +1,8 @@
-use rustbft_core::{Block, Hash, ValidatorSet};
+use crate::mempool::{TxCommitInfo, tx_hash_bytes};
+use redb::{Database, TableDefinition};
 use rustbft_core::codec::encode_block;
 use rustbft_core::crypto::sha256;
-use redb::{Database, TableDefinition};
+use rustbft_core::{Block, Hash, ValidatorSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -10,6 +11,7 @@ const T_BLOCK_HASH: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_
 const T_STATE_ROOT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("state_root");
 const T_VALSET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("valset");
 const T_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
+const T_TX_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_index");
 
 fn height_key(h: u64) -> [u8; 8] {
     h.to_be_bytes()
@@ -29,6 +31,7 @@ impl BlockStore {
         write_txn.open_table(T_STATE_ROOT)?;
         write_txn.open_table(T_VALSET)?;
         write_txn.open_table(T_META)?;
+        write_txn.open_table(T_TX_INDEX)?;
         write_txn.commit()?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -55,15 +58,43 @@ impl BlockStore {
             let mut t_sr = write_txn.open_table(T_STATE_ROOT)?;
             let mut t_vs = write_txn.open_table(T_VALSET)?;
             let mut t_meta = write_txn.open_table(T_META)?;
+            let mut t_tx = write_txn.open_table(T_TX_INDEX)?;
 
             t_blocks.insert(key.as_slice(), block_bytes.as_slice())?;
             t_hash.insert(key.as_slice(), block_hash.0.as_slice())?;
             t_sr.insert(key.as_slice(), state_root.0.as_slice())?;
             t_vs.insert(key.as_slice(), vs_bytes.as_slice())?;
             t_meta.insert(b"last_height".as_slice(), key.as_slice())?;
+
+            for (idx, tx) in block.txs.iter().enumerate() {
+                let hash = tx_hash_bytes(tx);
+                let info = TxCommitInfo {
+                    hash,
+                    height,
+                    index: idx as u32,
+                    success: None,
+                    gas_used: None,
+                    error: None,
+                };
+                let encoded = serde_json::to_vec(&info)?;
+                t_tx.insert(hash.0.as_slice(), encoded.as_slice())?;
+            }
         }
         write_txn.commit()?;
         Ok(())
+    }
+
+    pub fn load_tx_commit(&self, hash: Hash) -> Result<Option<TxCommitInfo>, anyhow::Error> {
+        let db = self.db.lock().unwrap();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(T_TX_INDEX)?;
+        match table.get(hash.0.as_slice())? {
+            None => Ok(None),
+            Some(guard) => {
+                let info: TxCommitInfo = serde_json::from_slice(guard.value())?;
+                Ok(Some(info))
+            }
+        }
     }
 
     /// Load a block by height.
@@ -148,8 +179,8 @@ impl BlockStore {
                 let bytes = guard.value();
                 if bytes.len() == 8 {
                     Ok(u64::from_be_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
                     ]))
                 } else {
                     Ok(0)

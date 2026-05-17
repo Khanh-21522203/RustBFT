@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn, error};
+use tokio::sync::{RwLock, mpsc};
+use tracing::{error, info, warn};
 
-use rustbft_consensus::{ConsensusCommand, ConsensusEvent, TimerCommand};
 use crate::contracts::ContractRuntime;
-use crate::metrics::registry::Metrics;
 use crate::execution::accounts::AppState;
 use crate::execution::executor::StateExecutor;
+use crate::mempool::{Mempool, tx_hash_bytes};
+use crate::metrics::registry::Metrics;
 use crate::storage::block_store::BlockStore;
 use crate::storage::state_store::StateStore;
 use crate::storage::wal::WAL;
+use rustbft_consensus::{ConsensusCommand, ConsensusEvent, TimerCommand};
 use rustbft_core::ValidatorSet;
 
 /// The command router runs on the Tokio runtime and bridges the synchronous
@@ -58,6 +59,9 @@ pub struct CommandRouter {
 
     /// Prometheus metrics.
     metrics: Arc<Metrics>,
+
+    /// Local pending transactions. Future work: replace this with persistent/gossiped mempool.
+    mempool: Arc<Mempool>,
 }
 
 impl CommandRouter {
@@ -75,6 +79,7 @@ impl CommandRouter {
         wal: Arc<tokio::sync::Mutex<WAL>>,
         validator_set: Arc<RwLock<ValidatorSet>>,
         metrics: Arc<Metrics>,
+        mempool: Arc<Mempool>,
     ) -> Self {
         Self {
             rx_cmd,
@@ -89,6 +94,7 @@ impl CommandRouter {
             wal,
             validator_set,
             metrics,
+            mempool,
         }
     }
 
@@ -124,7 +130,10 @@ impl CommandRouter {
                     let mut contracts = self.contracts.lock().await;
 
                     let start = std::time::Instant::now();
-                    match self.executor.execute_block(&mut state, &mut contracts, &block) {
+                    match self
+                        .executor
+                        .execute_block(&mut state, &mut contracts, &block)
+                    {
                         Ok((state_root, validator_updates)) => {
                             let elapsed = start.elapsed().as_secs_f64();
                             self.metrics.state_block_execution_duration.observe(elapsed);
@@ -176,6 +185,11 @@ impl CommandRouter {
                         warn!(error = %e, "WAL truncate failed");
                     }
 
+                    for tx in &block.txs {
+                        let hash = tx_hash_bytes(tx);
+                        self.mempool.remove(&hash);
+                    }
+
                     info!(height = height, "Block committed and persisted");
                     self.metrics.consensus_height.set(height as i64);
                 }
@@ -192,15 +206,15 @@ impl CommandRouter {
                 }
 
                 // Mempool commands (placeholder for now)
-                ConsensusCommand::ReapTxs { max_bytes: _ } => {
-                    // In a full implementation, this would query the mempool.
-                    // For MVP, respond with empty txs immediately.
+                ConsensusCommand::ReapTxs { max_bytes } => {
                     let _ = self.to_consensus.send(ConsensusEvent::TxsAvailable {
-                        txs: vec![],
+                        txs: self.mempool.reap(max_bytes),
                     });
                 }
-                ConsensusCommand::EvictTxs { tx_hashes: _ } => {
-                    // Mempool eviction placeholder
+                ConsensusCommand::EvictTxs { tx_hashes } => {
+                    for hash in tx_hashes {
+                        self.mempool.remove(&hash);
+                    }
                 }
             }
         }

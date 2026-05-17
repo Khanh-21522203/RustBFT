@@ -34,6 +34,7 @@ flowchart TB
         Consensus[Consensus Core<br>Tendermint-style BFT FSM]
         Router[Command Router<br>sync-to-async bridge]
         Timer[Timer Service<br>Tokio timeouts]
+        Mempool[Mempool Scaffold<br>pending txs + tx hash lookup]
         Executor[State Executor<br>accounts + contracts]
         Contracts[Contract Runtime<br>Wasmtime]
         Metrics[Metrics Registry<br>Prometheus client]
@@ -41,12 +42,16 @@ flowchart TB
 
     subgraph DataStores[Local Data Stores]
         BlockStore[(Block Store<br>redb)]
+        TxIndex[(Committed Tx Index<br>tx_hash -> height/index)]
         StateStore[(State Store<br>redb)]
         WAL[(Consensus WAL<br>file)]
     end
 
     Client -->|HTTP JSON-RPC| Rpc
     Rpc -->|read queries| BlockStore
+    Rpc -->|get_tx pending| Mempool
+    Rpc -->|get_tx committed| TxIndex
+    Rpc -->|broadcast_tx insert| Mempool
     Rpc -->|read account state| Executor
 
     Peer <-->|encrypted TCP gossip| P2P
@@ -55,9 +60,11 @@ flowchart TB
     Router -->|timer commands| Timer
     Timer -->|timeout events| Consensus
     Router -->|broadcast proposal/vote| P2P
+    Router -->|ReapTxs / EvictTxs| Mempool
     Router -->|execute committed block| Executor
     Executor -->|contract deploy/call| Contracts
     Router -->|persist committed block| BlockStore
+    BlockStore -->|indexes tx hashes| TxIndex
     Router -->|persist app state| StateStore
     Router -->|write/truncate consensus entries| WAL
     Router -->|update counters/gauges/histograms| Metrics
@@ -366,7 +373,7 @@ Staking scaffold:
   Rich validator metadata/economics stay in StakingState; consensus still consumes only id + power.
 
 Important current MVP gaps:
-  RPC broadcast_tx is accepted but not connected to a real mempool path yet.
+  Mempool is in-memory only; tx gossip, persistence, recheck, and retry helpers are future work.
   Proposal/vote signature verification is placeholder-wired in node-cli.
   WAL is written but not replayed on startup yet.
   Genesis validator configuration is not fully wired; node currently bootstraps self.
